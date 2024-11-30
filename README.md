@@ -1,26 +1,25 @@
-# r2-webdav
+# gdrive-webdav
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/abersheeran/r2-webdav)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/colobas/gdrive-webdav)
 
-Use Cloudflare Workers to provide a WebDav interface for Cloudflare R2.
+Use Cloudflare Workers to provide a WebDav interface for Google Drive.
 
 ## Usage
 
 Change wrangler.toml to your own.
 
-```toml
-[[r2_buckets]]
-binding = 'bucket' # <~ valid JavaScript variable name, don't change this
-bucket_name = 'webdav'
-```
-
-Then use wrangler to deploy.
-
 ```bash
 wrangler deploy
 
+# to authenticate the WebDav client
 wrangler secret put USERNAME
 wrangler secret put PASSWORD
+
+# to authenticate the Google Drive API
+wrangler secret put CLIENT_ID
+wrangler secret put CLIENT_SECRET
+wrangler secret put REFRESH_TOKEN
+wrangler secret put ROOT_FOLDER_ID
 ```
 
 ## Development
