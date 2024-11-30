@@ -1,5 +1,3 @@
-import { Response } from '@cloudflare/workers-types'
-
 export interface Env {
   // Google Drive API credentials
   CLIENT_ID: string;
@@ -24,20 +22,23 @@ class DriveClient {
       return this.accessToken;
     }
 
+    const body = new URLSearchParams({
+      client_id: this.env.CLIENT_ID,
+      client_secret: this.env.CLIENT_SECRET,
+      refresh_token: this.env.REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    });
+
     const response = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams({
-        client_id: this.env.CLIENT_ID,
-        client_secret: this.env.CLIENT_SECRET,
-        refresh_token: this.env.REFRESH_TOKEN,
-        grant_type: 'refresh_token',
-      }),
+      body: body,
     });
 
     const data = await response.json();
+
     this.accessToken = data.access_token;
     this.tokenExpiry = Date.now() + (data.expires_in * 1000);
     return this.accessToken;
@@ -75,13 +76,55 @@ class DriveClient {
     return files;
   }
 
-  async getFile(fileId: string): Promise<Response> {
+  async getResourceId(path: string, parentId: string): Promise<string> {
+    const parts = path.split('/');
+    let currentParentId = parentId;
+	console.log("getting resourceId", path, parentId);
+
+    for (const part of parts) {
+      const files = await this.listFiles(currentParentId);
+      const file = files.find(f => f.name === part);
+      if (!file) {
+        return '';
+      }
+      currentParentId = file.id;
+    }
+
+	if (currentParentId === parentId) {
+		return '';
+	}
+
+	return currentParentId;
+  }
+
+  async getFile(path: string): Promise<Response> {
+	const fileId = await this.getResourceId(path, this.env.ROOT_FOLDER_ID);
+	if (fileId === '') {
+		return new Response('Not Found', { status: 404 });
+	}
+
     const token = await this.getAccessToken();
     return fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
     });
+  }
+
+  async getResourceInfo(path: string): Promise<any> {
+	const fileId = (path === '' || path === '/') ? this.env.ROOT_FOLDER_ID : await this.getResourceId(path, this.env.ROOT_FOLDER_ID);
+
+	if (fileId === '') {
+		return null;
+	}
+
+    const token = await this.getAccessToken();
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,createdTime,modifiedTime`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    return response.json();
   }
 
   async uploadFile(parentId: string, name: string, content: ArrayBuffer, mimeType: string): Promise<any> {
@@ -106,7 +149,12 @@ class DriveClient {
     return response.json();
   }
 
-  async deleteFile(fileId: string): Promise<void> {
+  async deleteFile(path: string): Promise<void> {
+	const fileId = await this.getResourceId(path, this.env.ROOT_FOLDER_ID);
+	if (fileId === '') {
+		return;
+	}
+
     const token = await this.getAccessToken();
     await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
       method: 'DELETE',
@@ -116,10 +164,30 @@ class DriveClient {
     });
   }
 
-  async createFolder(parentId: string, name: string): Promise<any> {
+  async createFolder(path: string): Promise<any> {
+	// divide path into name and parts
+	const parts = path.split('/').filter(p => p.length > 0);
+	const name = parts.pop() || '';
+	const parentPath = parts.join('/');
+
+	let parentId;
+	if (parts.length > 0) {
+		parentId = await this.getResourceId(parentPath, this.env.ROOT_FOLDER_ID);
+		if (parentId === '' || parentId === null) {
+			parentId = await this.createFolder(parentPath);
+		}
+	} else {
+		parentId = this.env.ROOT_FOLDER_ID;
+	}
+
+	const response = await this.createFolderWithParentId(parentId, name);
+	return response.id;
+  }
+
+  private async createFolderWithParentId(parentId: string, name: string): Promise<any> {
     const token = await this.getAccessToken();
     const metadata = {
-      name,
+      name: name,
       mimeType: 'application/vnd.google-apps.folder',
       parents: [parentId],
     };
@@ -133,7 +201,11 @@ class DriveClient {
       body: JSON.stringify(metadata),
     });
 
-    return response.json();
+	if (response.status !== 200) {
+		throw new Error("Failed to create folder");
+	}
+
+	return response.json();
   }
 }
 
@@ -148,7 +220,11 @@ async function handle_get(request: Request, driveClient: DriveClient): Promise<R
   
   if (request.url.endsWith('/')) {
     // List directory contents
-    const files = await driveClient.listFiles(path || driveClient.env.ROOT_FOLDER_ID);
+	const parentId = (path === '' || path === '/') ? driveClient.env.ROOT_FOLDER_ID : await driveClient.getResourceId(path, driveClient.env.ROOT_FOLDER_ID);
+    const files = await driveClient.listFiles(parentId);
+
+	console.log("Got x children", files.length);
+
     let page = '';
     
     if (path !== '') {
@@ -156,9 +232,9 @@ async function handle_get(request: Request, driveClient: DriveClient): Promise<R
     }
 
     for (const file of files) {
-      const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
-      const href = `/${file.id}${isFolder ? '/' : ''}`;
-      page += `<a href="${href}">${file.name}</a><br>`;
+       const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
+       const href = `/${path}/${file.name}${isFolder ? '/' : ''}`;
+       page += `<a href="${href}">${file.name}</a><br>`;
     }
 
     const pageSource = `<!DOCTYPE html>
@@ -186,12 +262,42 @@ async function handle_get(request: Request, driveClient: DriveClient): Promise<R
   }
 }
 
+async function handle_head(request: Request, driveClient: DriveClient): Promise<Response> {
+  const path = make_resource_path(request);
+  const resource = await driveClient.getResourceInfo(path);
+  if (!resource) {
+    return new Response('Not Found', { status: 404 });
+  }
+  return new Response(null, { status: 200 });
+}
+
 async function handle_put(request: Request, driveClient: DriveClient): Promise<Response> {
   const path = make_resource_path(request);
   const content = await request.arrayBuffer();
   const mimeType = request.headers.get('Content-Type') || 'application/octet-stream';
-  
-  await driveClient.uploadFile(driveClient.env.ROOT_FOLDER_ID, path, content, mimeType);
+  console.log(path, mimeType);
+
+  // Split path into parts and get parent folder path
+  const parts = path.split('/').filter(p => p);
+  const fileName = parts.pop() || '';
+  const parentPath = parts.join('/');
+  console.log("parentPath", parentPath);
+
+  // Get or create parent folder
+  let parentId;
+  if (parentPath) {
+    const parentFolder = await driveClient.getResourceInfo(parentPath);
+    if (parentFolder) {
+      parentId = parentFolder.id;
+    } else {
+      // Create missing parent folder
+      parentId = await driveClient.createFolder(parentPath);
+    }
+  } else {
+    parentId = driveClient.env.ROOT_FOLDER_ID;
+  }
+ 
+  await driveClient.uploadFile(parentId, fileName, content, mimeType);
   return new Response(null, { status: 201 });
 }
 
@@ -203,7 +309,7 @@ async function handle_delete(request: Request, driveClient: DriveClient): Promis
 
 async function handle_mkcol(request: Request, driveClient: DriveClient): Promise<Response> {
   const path = make_resource_path(request);
-  await driveClient.createFolder(driveClient.env.ROOT_FOLDER_ID, path);
+  await driveClient.createFolder(path);
   return new Response(null, { status: 201 });
 }
 
@@ -216,6 +322,8 @@ async function handle_propfind(request: Request, driveClient: DriveClient): Prom
 	if (!resource) {
 		return new Response('Not Found', { status: 404 });
 	}
+
+	console.log("Got resource", resource);
 
 	// Build basic XML response
 	let responseXml = `<?xml version="1.0" encoding="utf-8" ?>
@@ -316,6 +424,8 @@ export default {
       switch (request.method) {
         case 'GET':
           return await handle_get(request, driveClient);
+		case 'HEAD':
+		  return await handle_head(request, driveClient);
         case 'PUT': 
           return await handle_put(request, driveClient);
         case 'DELETE':
@@ -330,8 +440,8 @@ export default {
           return new Response(null, {
             status: 204,
             headers: {
-              'Allow': 'GET, PUT, DELETE, MKCOL, OPTIONS',
-              'DAV': '1, 2',
+              'Allow': 'GET, PUT, DELETE, MKCOL, PROPFIND, PROPPATCH, OPTIONS',
+              'DAV': '1,2'
             },
           });
         default:
