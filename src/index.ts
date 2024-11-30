@@ -233,7 +233,7 @@ async function handle_get(request: Request, driveClient: DriveClient): Promise<R
 
     for (const file of files) {
        const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
-       const href = `/${path}/${file.name}${isFolder ? '/' : ''}`;
+       const href = `/${path}/${file.name}${isFolder ? '/' : ''}`.replace(/\/+/g, '/'); // Ensure path starts with / and normalize multiple slashes
        page += `<a href="${href}">${file.name}</a><br>`;
     }
 
