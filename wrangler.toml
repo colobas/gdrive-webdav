@@ -2,7 +2,7 @@ compatibility_date = "2024-10-22"
 main = "src/index.ts"
 name = "gdrive-webdav"
 
-node_compat = true
+nodejs_compat = true
 
 # Docs: https://developers.cloudflare.com/workers/observability/logs/workers-logs/#enable-workers-logs
 [observability]
